@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NK1 / Debeka AI Classifier</title>
+    
+    <!-- Tesseract JS v5 -->
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    
+    <!-- Modulele locale -->
+    <script src="german_ocr.js"></script>
+    <script src="nk1_rules.js"></script>
+
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background-color: #080a0f;
+            color: #c9d1d9;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        .container {
+            width: 100%;
+            max-width: 800px;
+            background-color: #12161f;
+            border: 1px solid #283040;
+            border-radius: 12px;
+            padding: 24px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+        }
+        h1 {
+            font-size: 22px;
+            color: #58a6ff;
+            text-align: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #283040;
+        }
+        #drop-zone {
+            border: 2px dashed #1f6feb;
+            border-radius: 8px;
+            padding: 40px;
+            text-align: center;
+            background-color: #0d1117;
+            cursor: pointer;
+            transition: all 0.2s ease-in-out;
+        }
+        #drop-zone:hover { background-color: #161b22; border-color: #58a6ff; }
+        #file-input { display: none; }
+        #preview-container { margin-top: 20px; text-align: center; display: none; }
+        #image-preview {
+            max-width: 100%; max-height: 300px; border-radius: 6px; border: 1px solid #30363d;
+        }
+        #result-card {
+            margin-top: 20px; padding: 25px; border-radius: 8px;
+            background-color: #091a10; border: 2px solid #2ea043;
+            text-align: center; display: none;
+        }
+        #lart-code { font-size: 60px; font-weight: bold; color: #ffcc00; margin: 5px 0; }
+        #lart-title { font-size: 18px; color: #fff; font-weight: bold; }
+        #match-info { margin-top: 10px; font-size: 12px; color: #58a6ff; font-family: monospace; }
+        #status {
+            margin-top: 20px; font-size: 14px; color: #58a6ff; text-align: center; font-weight: bold;
+        }
+        #ocr-debug {
+            margin-top: 15px; width: 100%; height: 120px;
+            background-color: #0d1117; color: #8b949e;
+            font-size: 11px; border: 1px solid #30363d;
+            padding: 10px; border-radius: 6px; overflow-y: auto; font-family: monospace; display: none;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>NK1 / Debeka Document Classifier</h1>
+
+    <div id="drop-zone" onclick="document.getElementById('file-input').click()">
+        <svg width="48" height="48" fill="none" stroke="#58a6ff" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
+        </svg>
+        <p><strong>Încarcă o captură de ecran a documentului</strong></p>
+        <p style="font-size:12px; color:#6e7681; margin-top:8px;">(Poți da direct <strong>Ctrl + V</strong> din clipboard)</p>
+        <input type="file" id="file-input" accept="image/*" onchange="handleFileSelect(event)">
+    </div>
+
+    <div id="status"></div>
+
+    <div id="preview-container">
+        <img id="image-preview" alt="Document Preview">
+    </div>
+
+    <div id="result-card">
+        <div style="font-size:12px; color:#2ea043; font-weight:bold; letter-spacing:1px;">COD ÎNCADRARE CORECT:</div>
+        <div id="lart-code">---</div>
+        <div id="lart-title">---</div>
+        <div id="match-info"></div>
+    </div>
+
+    <textarea id="ocr-debug" readonly placeholder="Textul analizat..."></textarea>
+</div>
+
+<script>
+    const dropZone = document.getElementById('drop-zone');
+    const fileInput = document.getElementById('file-input');
+    const previewContainer = document.getElementById('preview-container');
+    const imagePreview = document.getElementById('image-preview');
+    const resultCard = document.getElementById('result-card');
+    const lartCode = document.getElementById('lart-code');
+    const lartTitle = document.getElementById('lart-title');
+    const matchInfo = document.getElementById('match-info');
+    const statusElem = document.getElementById('status');
+    const ocrDebug = document.getElementById('ocr-debug');
+
+    let tesseractWorker = null;
+
+    dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.style.borderColor = "#fff"; });
+    dropZone.addEventListener('dragleave', e => { e.preventDefault(); dropZone.style.borderColor = "#1f6feb"; });
+    dropZone.addEventListener('drop', e => { e.preventDefault(); processFile(e.dataTransfer.files[0]); });
+    
+    function handleFileSelect(e) { processFile(e.target.files[0]); }
+    
+    window.addEventListener('paste', e => {
+        const items = (e.clipboardData || e.originalEvent.clipboardData).items;
+        for (let item of items) {
+            if (item.type.indexOf('image') !== -1) {
+                processFile(item.getAsFile());
+                break;
+            }
+        }
+    });
+
+    async function processFile(file) {
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = async e => {
+            imagePreview.src = e.target.result;
+            previewContainer.style.display = 'block';
+            resultCard.style.display = 'none';
+            ocrDebug.style.display = 'none';
+
+            imagePreview.onload = async () => {
+                try {
+                    statusElem.style.color = "#58a6ff";
+                    statusElem.innerText = "⏳ Optimizare vizuală a imaginii...";
+                    
+                    const processedCanvas = GermanOCR.preprocessImage(imagePreview);
+
+                    if (!tesseractWorker) {
+                        statusElem.innerText = "⏳ Se descarcă pachetul OCR pentru limba germană...";
+                        try {
+                            // Folosim pachetul stabil de pe jsDelivr pentru limba germană (deu)
+                            tesseractWorker = await Tesseract.createWorker('deu', 1, {
+                                langPath: 'https://cdn.jsdelivr.net/npm/@tesseract.js-data/deu@4.0.0/4.00/',
+                                logger: m => {
+                                    if (m.status) {
+                                        statusElem.innerText = `⏳ ${m.status.toUpperCase()} ${m.progress ? Math.round(m.progress * 100) + '%' : ''}`;
+                                    }
+                                }
+                            });
+                        } catch (langErr) {
+                            console.warn("Pachetul german dedicat a eșuat, se folosește motorul universal...", langErr);
+                            statusElem.innerText = "⚠️ Se trece pe motorul OCR universal...";
+                            tesseractWorker = await Tesseract.createWorker('eng', 1);
+                        }
+                    }
+
+                    statusElem.innerText = "⏳ Extragere text din document...";
+                    const { data: { text } } = await tesseractWorker.recognize(processedCanvas);
+
+                    const cleanText = GermanOCR.normalizeText(text);
+                    ocrDebug.value = cleanText;
+                    ocrDebug.style.display = 'block';
+
+                    const result = matchNK1Document(cleanText);
+
+                    if (result) {
+                        lartCode.innerText = result.code;
+                        lartTitle.innerText = result.title;
+                        matchInfo.innerText = result.matchedKW ? `Cuvinte-cheie detectate: [ ${result.matchedKW} ]` : "";
+                        resultCard.style.display = 'block';
+                        statusElem.innerText = "✅ CLASIFICARE COMPLETĂ!";
+                        statusElem.style.color = "#2ea043";
+                    } else {
+                        statusElem.style.color = "#ff7b72";
+                        statusElem.innerText = "❌ Nu s-au detectat elemente de recunoaștere NK1.";
+                    }
+                } catch (error) {
+                    console.error("Eroare detaliată:", error);
+                    statusElem.style.color = "#ff7b72";
+                    statusElem.innerText = "❌ Eroare la analiza textului. Verificați consola browserului (F12).";
+                }
+            };
+        };
+        reader.readAsDataURL(file);
+    }
+</script>
+</body>
+</html>
